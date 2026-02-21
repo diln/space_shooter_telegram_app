@@ -19,7 +19,26 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-function extractPrimaryAsteroidSprite(image: HTMLImageElement): HTMLCanvasElement {
+interface ExtractedAsteroid {
+  sprite: HTMLCanvasElement;
+  touchesEdge: boolean;
+}
+
+function mirrorCanvas(input: HTMLCanvasElement): HTMLCanvasElement {
+  const out = document.createElement("canvas");
+  out.width = input.width;
+  out.height = input.height;
+  const ctx = out.getContext("2d");
+  if (!ctx) {
+    throw new Error("Unable to create mirror canvas for asteroid sprite");
+  }
+  ctx.translate(out.width, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(input, 0, 0);
+  return out;
+}
+
+function extractPrimaryAsteroidSprite(image: HTMLImageElement): ExtractedAsteroid {
   const source = document.createElement("canvas");
   source.width = image.width;
   source.height = image.height;
@@ -36,7 +55,7 @@ function extractPrimaryAsteroidSprite(image: HTMLImageElement): HTMLCanvasElemen
   const visited = new Uint8Array(width * height);
   const alphaThreshold = 22;
 
-  type Component = { area: number; minX: number; minY: number; maxX: number; maxY: number; centerDist: number };
+  type Component = { area: number; minX: number; minY: number; maxX: number; maxY: number; centerDist: number; pixels: number[] };
   let best: Component | null = null;
 
   const stackX = new Int32Array(width * height);
@@ -69,6 +88,7 @@ function extractPrimaryAsteroidSprite(image: HTMLImageElement): HTMLCanvasElemen
       let maxY = y;
       let sumX = 0;
       let sumY = 0;
+      const pixels: number[] = [];
 
       while (top > 0) {
         top -= 1;
@@ -83,6 +103,7 @@ function extractPrimaryAsteroidSprite(image: HTMLImageElement): HTMLCanvasElemen
         area += 1;
         sumX += px;
         sumY += py;
+        pixels.push(pIdx);
         if (px < minX) minX = px;
         if (px > maxX) maxX = px;
         if (py < minY) minY = py;
@@ -119,7 +140,7 @@ function extractPrimaryAsteroidSprite(image: HTMLImageElement): HTMLCanvasElemen
       const compCenterX = sumX / area;
       const compCenterY = sumY / area;
       const centerDist = (compCenterX - cx) * (compCenterX - cx) + (compCenterY - cy) * (compCenterY - cy);
-      const candidate: Component = { area, minX, minY, maxX, maxY, centerDist };
+      const candidate: Component = { area, minX, minY, maxX, maxY, centerDist, pixels };
 
       if (!best) {
         best = candidate;
@@ -134,7 +155,7 @@ function extractPrimaryAsteroidSprite(image: HTMLImageElement): HTMLCanvasElemen
   }
 
   if (!best) {
-    return source;
+    return { sprite: source, touchesEdge: false };
   }
 
   const padding = 10;
@@ -154,8 +175,72 @@ function extractPrimaryAsteroidSprite(image: HTMLImageElement): HTMLCanvasElemen
 
   const dx = (size - cropWidth) / 2;
   const dy = (size - cropHeight) / 2;
-  outCtx.drawImage(source, cropX, cropY, cropWidth, cropHeight, dx, dy, cropWidth, cropHeight);
-  return out;
+  const drawX = Math.round(dx);
+  const drawY = Math.round(dy);
+
+  const outImageData = outCtx.createImageData(size, size);
+  const outData = outImageData.data;
+
+  for (const sourceIndex of best.pixels) {
+    const sx = sourceIndex % width;
+    const sy = Math.floor(sourceIndex / width);
+
+    if (sx < cropX || sx >= cropX + cropWidth || sy < cropY || sy >= cropY + cropHeight) {
+      continue;
+    }
+
+    const tx = sx - cropX + drawX;
+    const ty = sy - cropY + drawY;
+    if (tx < 0 || ty < 0 || tx >= size || ty >= size) {
+      continue;
+    }
+
+    const sourceOffset = sourceIndex * 4;
+    const targetOffset = (ty * size + tx) * 4;
+    outData[targetOffset] = data[sourceOffset];
+    outData[targetOffset + 1] = data[sourceOffset + 1];
+    outData[targetOffset + 2] = data[sourceOffset + 2];
+    outData[targetOffset + 3] = data[sourceOffset + 3];
+  }
+
+  const center = size / 2;
+  const radius = size * 0.48;
+  const feather = size * 0.07;
+
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const offset = (y * size + x) * 4;
+      const alpha = outData[offset + 3];
+      if (alpha === 0) {
+        continue;
+      }
+
+      const dxFromCenter = x + 0.5 - center;
+      const dyFromCenter = y + 0.5 - center;
+      const dist = Math.sqrt(dxFromCenter * dxFromCenter + dyFromCenter * dyFromCenter);
+      if (dist > radius) {
+        outData[offset + 3] = 0;
+      } else if (dist > radius - feather) {
+        const factor = (radius - dist) / feather;
+        outData[offset + 3] = Math.round(alpha * factor);
+      }
+    }
+  }
+
+  outCtx.putImageData(outImageData, 0, 0);
+
+  const touchesEdge = best.minX <= 4 || best.minY <= 4 || best.maxX >= width - 5 || best.maxY >= height - 5;
+  return { sprite: out, touchesEdge };
+}
+
+function buildAsteroidPool(asteroids: ExtractedAsteroid[]): HTMLCanvasElement[] {
+  let base = asteroids.filter((item) => !item.touchesEdge).map((item) => item.sprite);
+  if (base.length < 4) {
+    base = asteroids.map((item) => item.sprite);
+  }
+
+  const mirrored = base.map((sprite) => mirrorCanvas(sprite));
+  return [...base, ...mirrored];
 }
 
 let assetsPromise: Promise<GameAssets> | null = null;
@@ -180,7 +265,7 @@ export function loadGameAssets(): Promise<GameAssets> {
     backgroundFallback,
     shipIdle,
     shipFire,
-    asteroids: asteroids.map((sprite) => extractPrimaryAsteroidSprite(sprite)),
+    asteroids: buildAsteroidPool(asteroids.map((sprite) => extractPrimaryAsteroidSprite(sprite))),
   }));
 
   return assetsPromise;

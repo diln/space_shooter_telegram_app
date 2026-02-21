@@ -254,7 +254,11 @@ export class SpaceShooterEngine {
       this.ctx.save();
       this.ctx.translate(asteroid.x, asteroid.y);
       this.ctx.rotate(asteroid.rotation);
-      this.ctx.drawImage(asteroid.sprite, -asteroid.radius, -asteroid.radius, diameter, diameter);
+      this.ctx.beginPath();
+      // Tight clipping removes residual checker/shadow artifacts embedded in source PNGs.
+      this.ctx.arc(0, 0, asteroid.radius * 0.84, 0, Math.PI * 2);
+      this.ctx.clip();
+      this.ctx.drawImage(asteroid.sprite, -asteroid.radius, -asteroid.radius * 1.12, diameter, diameter);
       this.ctx.restore();
     }
 
