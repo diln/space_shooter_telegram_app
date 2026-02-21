@@ -1,14 +1,38 @@
 # Space Shooter Telegram Mini App Monorepo
 
-Monorepo для Telegram Mini App:
-- `backend` — FastAPI + SQLAlchemy 2 + Alembic + PostgreSQL
-- `frontend` — React + Vite + TypeScript + Canvas 2D game
-- `bot` — python-telegram-bot (polling) + internal notify API
-- `docker-compose.yml` — единый запуск (локально и на сервере)
+Готовый монорепозиторий Telegram Mini App:
+- `backend` — FastAPI + PostgreSQL
+- `frontend` — React + Vite + Canvas game
+- `bot` — python-telegram-bot
+- `docker-compose.yml` — единый запуск
 
-## Быстрый запуск
+## 1) Что подготовить заранее
 
-1. Создайте env-файлы:
+- Домен (или субдомен), который указывает на ваш сервер (`A` запись).
+- HTTPS для этого домена (через ваш reverse proxy: Caddy/Nginx/Traefik).
+- Telegram бот, созданный через BotFather.
+
+## 2) Откуда брать ключевые значения
+
+- `BOT_TOKEN`
+  - В BotFather после `/newbot`.
+  - Если токен уже светился, сделайте `/revoke` и используйте новый.
+- `ADMIN_TELEGRAM_IDS`
+  - Ваш Telegram numeric user id.
+  - Получить можно у ботов вроде `@userinfobot` / `@RawDataBot`.
+  - Если админов несколько: через запятую, например `123456789,987654321`.
+- `JWT_SECRET`
+  - Сгенерировать на сервере:
+  - `openssl rand -hex 32`
+- `BOT_INTERNAL_TOKEN`
+  - Сгенерировать на сервере:
+  - `openssl rand -hex 32`
+  - Это общий секрет между backend и bot.
+  - В `bot/.env` значение `INTERNAL_API_TOKEN` должно быть точно таким же.
+
+## 3) Заполнить env-файлы
+
+Скопируйте примеры:
 
 ```bash
 cp .env.example .env
@@ -17,100 +41,82 @@ cp bot/.env.example bot/.env
 cp frontend/.env.example frontend/.env
 ```
 
-2. Заполните значения:
+### Корневой `.env`
 
-- `.env`
-  - `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`
-  - `FRONTEND_PORT` (обычно `8080`)
-  - `EDGE_SHARED_NETWORK` (обычно `edge_shared`)
-- `backend/.env`
-  - `BOT_TOKEN`
-  - `JWT_SECRET` (сгенерируйте: `openssl rand -hex 32`)
-  - `ADMIN_TELEGRAM_IDS`
-  - `BOT_INTERNAL_TOKEN` (сгенерируйте: `openssl rand -hex 32`)
-  - `ALLOWED_ORIGINS=https://app1.adminremote.ru`
-  - `MINI_APP_URL=https://app1.adminremote.ru`
-- `bot/.env`
-  - `BOT_TOKEN`
-  - `MINI_APP_URL=https://app1.adminremote.ru`
-  - `ADMIN_TELEGRAM_IDS`
-  - `INTERNAL_API_TOKEN` (должен совпадать с `BOT_INTERNAL_TOKEN`)
+- `POSTGRES_DB` — имя БД.
+- `POSTGRES_USER` — пользователь БД.
+- `POSTGRES_PASSWORD` — пароль пользователя БД.
+- `FRONTEND_PORT` — локальный порт frontend на сервере (обычно `8080`).
 
-3. Запустите:
+### `backend/.env`
+
+- `BOT_TOKEN` — токен из BotFather.
+- `JWT_SECRET` — сгенерированный секрет (см. выше).
+- `ADMIN_TELEGRAM_IDS` — список Telegram ID админов.
+- `BOT_INTERNAL_TOKEN` — внутренний токен backend↔bot.
+- `ALLOWED_ORIGINS=https://<APP_DOMAIN>` — публичный домен Mini App.
+- `MINI_APP_URL=https://<APP_DOMAIN>` — тот же публичный домен.
+- `SESSION_COOKIE_SECURE=true` — оставьте `true` для HTTPS.
+
+### `bot/.env`
+
+- `BOT_TOKEN` — тот же токен из BotFather.
+- `MINI_APP_URL=https://<APP_DOMAIN>` — тот же публичный домен.
+- `ADMIN_TELEGRAM_IDS` — Telegram ID админов.
+- `INTERNAL_API_TOKEN` — должен совпадать с `BOT_INTERNAL_TOKEN` из backend.
+
+## 4) Поднять приложение
 
 ```bash
 docker compose up -d --build
 ```
 
-4. Проверяйте:
+Проверка:
 
 ```bash
 docker compose ps
 docker compose logs -f
 ```
 
-## Интеграция с существующим edge (`lab`)
+Локальные health-check endpoints:
 
-В этом проекте `frontend` подключается к сети `edge_shared` и доступен как `space_frontend:80`.
+- `http://127.0.0.1:<FRONTEND_PORT>/healthz`
+- `http://127.0.0.1:8000/health`
+- `http://127.0.0.1:8081/health`
 
-### 1) Caddy (`/opt/lab/caddy/Caddyfile`)
+## 5) Привязать домен в Telegram (BotFather)
 
-```caddy
-app1.adminremote.ru {
-  reverse_proxy space_frontend:80
-}
-```
+Когда приложение уже запущено и ваш домен отвечает по HTTPS:
 
-### 2) HAProxy (`/opt/lab/haproxy/haproxy.cfg`)
+1. Откройте BotFather -> ваш бот -> `Mini Apps`.
+2. В `Main App` укажите: `https://<APP_DOMAIN>`.
+3. В `Menu Button` укажите тот же URL: `https://<APP_DOMAIN>`.
 
-В `frontend fe_tls_in` добавьте:
+После изменения URL в BotFather перезапуск контейнеров обычно не нужен, если `MINI_APP_URL` в env уже совпадает.
 
-```haproxy
-  acl sni_space_app req.ssl_sni -i app1.adminremote.ru
-  use_backend be_space_app if sni_space_app
-```
+## 6) Проверка полного сценария
 
-В конец файла добавьте:
+1. В Telegram отправьте боту `/start`.
+2. Нажмите `Open Space Shooter`.
+3. Новый пользователь увидит экран без доступа и нажмёт `Запросить доступ`.
+4. Админ открывает `/admin` в Mini App и делает `Approve`.
+5. Пользователь открывает `/play`, играет, результат попадает в leaderboard.
 
-```haproxy
-backend be_space_app
-  server caddy caddy:443 check resolvers docker init-addr last,libc,none
-```
+## 7) Ротация BOT_TOKEN (если нужен revoke)
 
-### 3) Перезапуск edge
-
-```bash
-cd /opt/lab
-docker compose up -d caddy haproxy
-```
-
-Важно: контейнеры `lab` (`caddy`, `haproxy`) должны быть подключены к сети `edge_shared`.
-
-## Почему backend падал с `password authentication failed`
-
-Причина: пароль пользователя `app` в Postgres не совпал с паролем, который backend использует в `DATABASE_URL`.
-
-Сейчас `DATABASE_URL` собирается автоматически из `.env` (`POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB`), поэтому держите пароль в одном месте: в корневом `.env`.
-
-Если БД уже была и пароль менялся:
-
-1. Без потери данных — сменить пароль в БД:
+1. В BotFather: `/revoke` -> выберите бота -> получите новый токен.
+2. Обновите `BOT_TOKEN` в:
+   - `backend/.env`
+   - `bot/.env`
+3. Перезапустите сервисы:
 
 ```bash
-docker compose exec postgres psql -U app -d postgres -c "ALTER USER app WITH PASSWORD 'change_me_strong';"
-# подставьте ваши реальные user/password из .env
-```
-
-2. С потерей данных (быстрее для теста):
-
-```bash
-docker compose down -v
-docker compose up -d --build
+docker compose up -d --build backend bot
 ```
 
 ## Безопасность
 
-- Верификация Telegram WebApp `initData` на backend (HMAC SHA-256)
-- Сессия в `httpOnly` cookie
-- Admin endpoints: валидная сессия + `ADMIN_TELEGRAM_IDS`
-- Game endpoints: только `APPROVED` пользователи
+- Верификация Telegram WebApp `initData` на backend (HMAC SHA-256).
+- Сессия в `httpOnly` cookie.
+- Admin API требует валидную сессию и вхождение в `ADMIN_TELEGRAM_IDS`.
+- Game API доступно только пользователям со статусом `APPROVED`.
