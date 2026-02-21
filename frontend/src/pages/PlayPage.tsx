@@ -1,15 +1,22 @@
-import { useEffect, useRef, useState } from "react";
+import { type PointerEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { ApiError, api } from "../api/client";
+import { loadGameAssets, type GameAssets } from "../game/assets";
 import { SpaceShooterEngine } from "../game/engine";
 import type { Difficulty, LeaderboardEntry } from "../types/domain";
 
 const difficulties: Difficulty[] = ["easy", "normal", "hard"];
+const JOYSTICK_RADIUS = 42;
+const CANVAS_WIDTH = 390;
+const CANVAS_HEIGHT = 640;
 
 export function PlayPage(): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<SpaceShooterEngine | null>(null);
   const scoreSubmittedRef = useRef(false);
+  const joystickRef = useRef<HTMLDivElement | null>(null);
+  const joystickPointerIdRef = useRef<number | null>(null);
+  const firePointerIdRef = useRef<number | null>(null);
 
   const [difficulty, setDifficulty] = useState<Difficulty>("easy");
   const [started, setStarted] = useState(false);
@@ -18,10 +25,15 @@ export function PlayPage(): JSX.Element {
   const [gameOver, setGameOver] = useState(false);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [assets, setAssets] = useState<GameAssets | null>(null);
+  const [assetsLoading, setAssetsLoading] = useState(true);
 
-  const [left, setLeft] = useState(false);
-  const [right, setRight] = useState(false);
-  const [shoot, setShoot] = useState(false);
+  const [keyboardLeft, setKeyboardLeft] = useState(false);
+  const [keyboardRight, setKeyboardRight] = useState(false);
+  const [keyboardShoot, setKeyboardShoot] = useState(false);
+  const [touchMoveX, setTouchMoveX] = useState(0);
+  const [touchShoot, setTouchShoot] = useState(false);
+  const [joystickOffset, setJoystickOffset] = useState({ x: 0, y: 0, active: false });
 
   const loadLeaderboard = async (value: Difficulty): Promise<void> => {
     try {
@@ -41,17 +53,47 @@ export function PlayPage(): JSX.Element {
   }, [difficulty]);
 
   useEffect(() => {
+    setAssetsLoading(true);
+    loadGameAssets()
+      .then((loadedAssets) => {
+        setAssets(loadedAssets);
+      })
+      .catch(() => {
+        setError("Failed to load game assets");
+      })
+      .finally(() => setAssetsLoading(false));
+  }, []);
+
+  const moveX = useMemo(() => {
+    const keyboardAxis = (keyboardLeft ? -1 : 0) + (keyboardRight ? 1 : 0);
+    return Math.max(-1, Math.min(1, keyboardAxis + touchMoveX));
+  }, [keyboardLeft, keyboardRight, touchMoveX]);
+
+  const shoot = keyboardShoot || touchShoot;
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.code === "ArrowLeft" || event.code === "KeyA") setLeft(true);
-      if (event.code === "ArrowRight" || event.code === "KeyD") setRight(true);
-      if (event.code === "Space") setShoot(true);
-      if (event.code === "Escape") setPaused((p) => !p);
+      if (event.code === "ArrowLeft" || event.code === "KeyA") {
+        setKeyboardLeft(true);
+        event.preventDefault();
+      }
+      if (event.code === "ArrowRight" || event.code === "KeyD") {
+        setKeyboardRight(true);
+        event.preventDefault();
+      }
+      if (event.code === "Space") {
+        setKeyboardShoot(true);
+        event.preventDefault();
+      }
+      if ((event.code === "Escape" || event.code === "KeyP") && !event.repeat) {
+        setPaused((p) => !p);
+      }
     };
 
     const onKeyUp = (event: KeyboardEvent): void => {
-      if (event.code === "ArrowLeft" || event.code === "KeyA") setLeft(false);
-      if (event.code === "ArrowRight" || event.code === "KeyD") setRight(false);
-      if (event.code === "Space") setShoot(false);
+      if (event.code === "ArrowLeft" || event.code === "KeyA") setKeyboardLeft(false);
+      if (event.code === "ArrowRight" || event.code === "KeyD") setKeyboardRight(false);
+      if (event.code === "Space") setKeyboardShoot(false);
     };
 
     window.addEventListener("keydown", onKeyDown);
@@ -63,12 +105,20 @@ export function PlayPage(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    engineRef.current?.setControls({ left, right, shoot });
-  }, [left, right, shoot]);
+    engineRef.current?.setControls({ moveX, shoot });
+  }, [moveX, shoot]);
 
   useEffect(() => {
     engineRef.current?.setPaused(paused);
   }, [paused]);
+
+  useEffect(() => {
+    if (!started || paused || gameOver) {
+      setTouchMoveX(0);
+      setTouchShoot(false);
+      setJoystickOffset({ x: 0, y: 0, active: false });
+    }
+  }, [started, paused, gameOver]);
 
   useEffect(() => {
     return () => {
@@ -92,7 +142,7 @@ export function PlayPage(): JSX.Element {
 
   const startGame = (): void => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || !assets) return;
 
     engineRef.current?.destroy();
     setError(null);
@@ -103,7 +153,7 @@ export function PlayPage(): JSX.Element {
     setStarted(true);
     scoreSubmittedRef.current = false;
 
-    const engine = new SpaceShooterEngine(canvas, difficulty);
+    const engine = new SpaceShooterEngine(canvas, difficulty, assets);
     engineRef.current = engine;
     engine.start((snapshot) => {
       setScore(snapshot.score);
@@ -119,14 +169,68 @@ export function PlayPage(): JSX.Element {
     });
   };
 
+  const onJoystickPointerMove = (clientX: number, clientY: number): void => {
+    const joystick = joystickRef.current;
+    if (!joystick) return;
+    const rect = joystick.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+
+    let dx = clientX - cx;
+    let dy = clientY - cy;
+    const distance = Math.hypot(dx, dy);
+
+    if (distance > JOYSTICK_RADIUS) {
+      const factor = JOYSTICK_RADIUS / distance;
+      dx *= factor;
+      dy *= factor;
+    }
+
+    setJoystickOffset({ x: dx, y: dy, active: true });
+    setTouchMoveX(dx / JOYSTICK_RADIUS);
+  };
+
+  const onJoystickDown = (event: PointerEvent<HTMLDivElement>): void => {
+    if (!started || paused || gameOver) return;
+    joystickPointerIdRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    onJoystickPointerMove(event.clientX, event.clientY);
+  };
+
+  const onJoystickMove = (event: PointerEvent<HTMLDivElement>): void => {
+    if (joystickPointerIdRef.current !== event.pointerId) return;
+    onJoystickPointerMove(event.clientX, event.clientY);
+  };
+
+  const resetJoystick = (pointerId: number): void => {
+    if (joystickPointerIdRef.current !== pointerId) return;
+    joystickPointerIdRef.current = null;
+    setJoystickOffset({ x: 0, y: 0, active: false });
+    setTouchMoveX(0);
+  };
+
+  const onFireDown = (event: PointerEvent<HTMLButtonElement>): void => {
+    if (!started || paused || gameOver) return;
+    firePointerIdRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setTouchShoot(true);
+  };
+
+  const resetFire = (pointerId: number): void => {
+    if (firePointerIdRef.current !== pointerId) return;
+    firePointerIdRef.current = null;
+    setTouchShoot(false);
+  };
+
   return (
-    <main className="card play">
+    <main className="card play play-upgraded">
       <section className="hero">
-        <p className="eyebrow">Arcade Mode</p>
+        <p className="eyebrow">Tactical Flight</p>
         <h1>Space Shooter</h1>
       </section>
 
-      <section className="difficulty-grid">
+      <section className="panel difficulty-panel">
+        <div className="difficulty-grid">
         {difficulties.map((item) => (
           <button
             key={item}
@@ -137,6 +241,11 @@ export function PlayPage(): JSX.Element {
             {item.toUpperCase()}
           </button>
         ))}
+        </div>
+        <p className="muted desktop-hint">
+          Desktop: <kbd>A</kbd>/<kbd>D</kbd> или <kbd>&larr;</kbd>/<kbd>&rarr;</kbd>, огонь <kbd>Space</kbd>, пауза{" "}
+          <kbd>Esc</kbd>/<kbd>P</kbd>.
+        </p>
       </section>
 
       <div className="hud panel">
@@ -149,11 +258,13 @@ export function PlayPage(): JSX.Element {
       </div>
 
       <section className="game-shell">
-        <canvas ref={canvasRef} width={360} height={540} className="game-canvas" />
+        <canvas ref={canvasRef} width={CANVAS_WIDTH} height={CANVAS_HEIGHT} className="game-canvas" />
+        {assetsLoading && <div className="game-overlay">Loading visual pack...</div>}
+        {paused && !gameOver && <div className="game-overlay">Paused</div>}
       </section>
 
       {!started && (
-        <button className="btn primary" onClick={startGame}>
+        <button className="btn primary" onClick={startGame} disabled={assetsLoading || !assets}>
           Start
         </button>
       )}
@@ -168,37 +279,33 @@ export function PlayPage(): JSX.Element {
         </section>
       )}
 
-      <section className="touch-controls panel">
-        <button
-          className="btn"
-          onTouchStart={() => setLeft(true)}
-          onTouchEnd={() => setLeft(false)}
-          onMouseDown={() => setLeft(true)}
-          onMouseUp={() => setLeft(false)}
-          onMouseLeave={() => setLeft(false)}
+      <section className="panel control-deck">
+        <div
+          ref={joystickRef}
+          className={`joystick-pad ${joystickOffset.active ? "active" : ""}`}
+          onPointerDown={onJoystickDown}
+          onPointerMove={onJoystickMove}
+          onPointerUp={(event) => resetJoystick(event.pointerId)}
+          onPointerCancel={(event) => resetJoystick(event.pointerId)}
+          onLostPointerCapture={(event) => resetJoystick(event.pointerId)}
         >
-          Left
-        </button>
+          <div className="joystick-base" />
+          <div
+            className="joystick-knob"
+            style={{ transform: `translate(${joystickOffset.x}px, ${joystickOffset.y}px)` }}
+          />
+        </div>
+
         <button
-          className="btn"
-          onTouchStart={() => setShoot(true)}
-          onTouchEnd={() => setShoot(false)}
-          onMouseDown={() => setShoot(true)}
-          onMouseUp={() => setShoot(false)}
-          onMouseLeave={() => setShoot(false)}
+          className={`fire-pad ${touchShoot ? "active" : ""}`}
+          onPointerDown={onFireDown}
+          onPointerUp={(event) => resetFire(event.pointerId)}
+          onPointerCancel={(event) => resetFire(event.pointerId)}
+          onLostPointerCapture={(event) => resetFire(event.pointerId)}
         >
-          Fire
+          FIRE
         </button>
-        <button
-          className="btn"
-          onTouchStart={() => setRight(true)}
-          onTouchEnd={() => setRight(false)}
-          onMouseDown={() => setRight(true)}
-          onMouseUp={() => setRight(false)}
-          onMouseLeave={() => setRight(false)}
-        >
-          Right
-        </button>
+        <p className="touch-hint">Движение: левый стик. Огонь: удерживайте FIRE.</p>
       </section>
 
       <section className="panel">
