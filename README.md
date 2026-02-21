@@ -6,6 +6,7 @@ Monorepo для Telegram Mini App:
 - `bot` — python-telegram-bot (polling) + internal notify API
 - `docker-compose.yml` — локальный запуск
 - `docker-compose.prod.yml` + `deploy/caddy/Caddyfile` — прод с HTTPS через Caddy
+- `docker-compose.edge.yml` — прод за внешним edge proxy (например, ваш `lab`)
 
 ## Структура
 
@@ -62,6 +63,7 @@ docker compose up -d --build backend bot frontend
 
 ### Файлы
 - `docker-compose.prod.yml`
+- `docker-compose.edge.yml`
 - `deploy/caddy/Caddyfile`
 - `.env.prod.example`
 - `backend/.env.prod.example`
@@ -81,7 +83,7 @@ cp bot/.env.prod.example bot/.env.prod
 ```
 
 Заполните минимум:
-- `.env.prod`: `APP_DOMAIN`, `ACME_EMAIL`, `POSTGRES_*`
+- `.env.prod`: `APP_DOMAIN`, `ACME_EMAIL`, `POSTGRES_*` (для режима с внешним edge: `EDGE_SHARED_NETWORK=edge_shared`)
 - `backend/.env.prod`: `BOT_TOKEN`, `JWT_SECRET`, `ADMIN_TELEGRAM_IDS`, `BOT_INTERNAL_TOKEN`, `ALLOWED_ORIGINS=https://<APP_DOMAIN>`, `MINI_APP_URL=https://<APP_DOMAIN>`
 - `bot/.env.prod`: `BOT_TOKEN`, `ADMIN_TELEGRAM_IDS`, `INTERNAL_API_TOKEN`, `MINI_APP_URL=https://<APP_DOMAIN>`
 
@@ -97,17 +99,48 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
 
 ## Если на сервере заняты 80/443
 
-У вас как раз этот случай. Тогда есть два варианта:
+У вас как раз этот случай. Рекомендуемый вариант: использовать существующий edge (`lab`) и не поднимать `space_caddy_prod`.
 
-1. Рекомендуется: оставить текущий edge proxy (ваш существующий `caddy/haproxy`) на `80/443` и проксировать запросы на этот проект по внутреннему порту.
-- В `.env.prod` задайте, например:
-  - `PUBLIC_HTTP_PORT=8088`
-  - `PUBLIC_HTTPS_PORT=8443`
-- Поднимите `docker-compose.prod.yml`.
-- В существующем edge прокси сделайте маршрут домена на `127.0.0.1:8088`.
-- TLS сертификат пусть выписывает edge прокси.
+1. Создайте общую docker-сеть (один раз):
 
-2. Если хотите, чтобы сертификаты выпускал именно этот новый Caddy, нужно освободить `80/443` и пробросить их в этот compose.
+```bash
+docker network create edge_shared
+```
+
+2. Поднимите Space Shooter без встроенного caddy, но с подключением frontend к `edge_shared`:
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.edge.yml up -d --build postgres backend bot frontend
+```
+
+3. В `lab/caddy/Caddyfile` добавьте:
+
+```caddy
+app1.adminremote.ru {
+  reverse_proxy space_frontend_prod:80
+}
+```
+
+4. В `lab/haproxy/haproxy.cfg` в `frontend fe_tls_in` добавьте:
+
+```haproxy
+  acl sni_space_app req.ssl_sni -i app1.adminremote.ru
+  use_backend be_space_app if sni_space_app
+```
+
+И в конец файла:
+
+```haproxy
+backend be_space_app
+  server caddy caddy:443 check resolvers docker init-addr last,libc,none
+```
+
+5. Перезапустите только edge-сервисы `lab`:
+
+```bash
+cd /opt/lab
+docker compose up -d caddy haproxy
+```
 
 ## Безопасность (реализовано)
 

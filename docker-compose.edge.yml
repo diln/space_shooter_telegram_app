@@ -1,0 +1,10 @@
+services:
+  frontend:
+    networks:
+      - default
+      - edge_shared
+
+networks:
+  edge_shared:
+    external: true
+    name: ${EDGE_SHARED_NETWORK:-edge_shared}
