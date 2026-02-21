@@ -14,7 +14,7 @@ interface Asteroid {
   speed: number;
   rotation: number;
   spin: number;
-  sprite: HTMLImageElement;
+  sprite: HTMLCanvasElement;
 }
 
 export interface GameSnapshot {
